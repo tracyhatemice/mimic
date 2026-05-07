@@ -1,10 +1,12 @@
 #!/bin/sh /etc/rc.common
 
-START=19
+START=50
 USE_PROCD=1
 
 PROG=/usr/bin/mimic
 KMOD_NAME=mimic
+
+. /lib/functions/network.sh
 
 ensure_kmod_loaded() {
 	[ -d "/sys/module/$KMOD_NAME" ] && return 0
@@ -13,7 +15,7 @@ ensure_kmod_loaded() {
 
 start_instance() {
 	local cfg="$1"
-	local enabled interface config_file
+	local enabled interface config_file dev
 
 	config_get_bool enabled "$cfg" enabled 0
 	[ "$enabled" -eq 1 ] || return 0
@@ -26,8 +28,12 @@ start_instance() {
 
 	config_get config_file "$cfg" config_file "/etc/mimic/${interface}.conf"
 
-	if [ ! -e "/sys/class/net/${interface}" ]; then
-		logger -t mimic "Interface '$interface' does not exist, skipping (cfg=$cfg)"
+	# 'interface' is a logical OpenWrt network interface; resolve it to
+	# the underlying netdev. If the iface isn't up yet (typical at boot
+	# for pppoe-wan), skip silently — the procd interface trigger will
+	# fire once it does come up.
+	if ! network_get_device dev "$interface" || [ -z "$dev" ]; then
+		logger -t mimic "Logical interface '$interface' not up, skipping (cfg=$cfg)"
 		return 0
 	fi
 
@@ -37,15 +43,34 @@ start_instance() {
 	fi
 
 	procd_open_instance "$cfg"
-	procd_set_param command "$PROG" run "$interface" -F "$config_file"
+	procd_set_param command "$PROG" run "$dev" -F "$config_file"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
 }
 
+# Watch each enabled section's logical interface; restart that instance
+# on any state change (up/down/update). dnsmasq does the same via
+# procd_add_interface_trigger.
+add_iface_trigger() {
+	local cfg="$1"
+	local enabled interface
+
+	config_get_bool enabled "$cfg" enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+
+	config_get interface "$cfg" interface
+	[ -n "$interface" ] || return 0
+
+	procd_add_interface_trigger "interface.*" "$interface" \
+		/etc/init.d/mimic restart "$cfg"
+}
+
 service_triggers() {
 	procd_add_reload_trigger "mimic"
+	config_load mimic
+	config_foreach add_iface_trigger mimic
 }
 
 section_match() {

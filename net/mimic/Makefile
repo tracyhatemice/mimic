@@ -5,7 +5,7 @@ include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME := mimic
 PKG_VERSION := 0.7.1.20251120
-PKG_RELEASE := 2
+PKG_RELEASE := 3
 
 commit := 493faf5dfd440bc44bc0d2a88baaca4d7ef0b709
 PKG_BUILD_DIR := $(BUILD_DIR)/mimic-$(commit)
@@ -78,12 +78,12 @@ define Package/mimic/install
 	$(INSTALL_CONF) ./files/etc/config/mimic $(1)/etc/config/mimic
 
 	$(INSTALL_DIR) $(1)/etc/mimic
-	$(INSTALL_CONF) ./files/etc/mimic/eth0.conf $(1)/etc/mimic/eth0.conf
+	$(INSTALL_CONF) ./files/etc/mimic/wan.conf $(1)/etc/mimic/wan.conf
 endef
 
 define Package/mimic/conffiles
 /etc/config/mimic
-/etc/mimic/eth0.conf
+/etc/mimic/wan.conf
 endef
 
 define Package/mimic/postinst

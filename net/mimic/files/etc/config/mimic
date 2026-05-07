@@ -1,14 +1,16 @@
 # Mimic obfuscates UDP traffic (e.g. WireGuard) as TCP using eBPF.
 #
-# Each `config mimic` section runs one mimic instance against the named
-# interface, using the per-interface config file (default
-# /etc/mimic/<interface>.conf).
+# Each `config mimic` section runs one mimic instance against an OpenWrt
+# logical network interface (an entry in /etc/config/network — e.g.
+# 'wan', 'lan', 'vpn'). mimic resolves the logical name to the underlying
+# netdev (e.g. 'wan' on PPPoE → 'pppoe-wan'), attaches its eBPF programs,
+# and is automatically restarted when the interface state changes.
 #
-# To enable: set `enabled '1'`, ensure the interface exists, edit the
-# referenced config_file with at least one `filter` line, then run
-# `service mimic restart`.
+# To enable: set `enabled '1'`, ensure `interface` matches a section in
+# /etc/config/network, edit the referenced `config_file` with at least
+# one `filter` line, then `service mimic restart`.
 
-config mimic 'eth0'
+config mimic 'wan'
 	option enabled '0'
-	option interface 'eth0'
-	option config_file '/etc/mimic/eth0.conf'
+	option interface 'wan'
+	option config_file '/etc/mimic/wan.conf'
