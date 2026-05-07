@@ -62,3 +62,8 @@ Mkfile.old
 /kmod/AKMBUILD
 .pc
 compile_commands.json
+
+/.claude/
+
+# `*.d` above also matches init.d directories; un-ignore packaged ones.
+!**/files/etc/init.d/
