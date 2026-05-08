@@ -9,62 +9,70 @@ KMOD_NAME=mimic
 . /lib/functions/network.sh
 
 ensure_kmod_loaded() {
-	[ -d "/sys/module/$KMOD_NAME" ] && return 0
-	modprobe "$KMOD_NAME"
+	[ -d "/sys/module/${KMOD_NAME}" ] && return 0
+	modprobe "${KMOD_NAME}"
 }
 
 start_instance() {
-	local cfg="$1"
+	local cfg="${1}"
 	local enabled interface config_file dev
 
-	config_get_bool enabled "$cfg" enabled 0
-	[ "$enabled" -eq 1 ] || return 0
+	config_get_bool enabled "${cfg}" enabled 0
+	[ "${enabled}" -eq 1 ] || return 0
 
-	config_get interface "$cfg" interface
-	[ -n "$interface" ] || {
-		logger -t mimic "Section '$cfg' missing 'interface', skipping"
+	config_get interface "${cfg}" interface
+	[ -n "${interface}" ] || {
+		logger -t mimic "Section '${cfg}' missing 'interface', skipping"
 		return 0
 	}
 
-	config_get config_file "$cfg" config_file "/etc/mimic/${interface}.conf"
+	config_get config_file "${cfg}" config_file "/etc/mimic/${interface}.conf"
 
 	# 'interface' is a logical OpenWrt network interface; resolve it to
 	# the underlying netdev. If the iface isn't up yet (typical at boot
 	# for pppoe-wan), skip silently — the procd interface trigger will
 	# fire once it does come up.
-	if ! network_get_device dev "$interface" || [ -z "$dev" ]; then
-		logger -t mimic "Logical interface '$interface' not up, skipping (cfg=$cfg)"
+	if ! network_get_device dev "${interface}" || [ -z "${dev}" ]; then
+		logger -t mimic "Logical interface '${interface}' not up, skipping (cfg=${cfg})"
 		return 0
 	fi
 
-	if [ ! -r "$config_file" ]; then
-		logger -t mimic "Config '$config_file' missing or unreadable, skipping (cfg=$cfg)"
+	if [ ! -r "${config_file}" ]; then
+		logger -t mimic "Config '${config_file}' missing or unreadable, skipping (cfg=${cfg})"
 		return 0
 	fi
 
-	procd_open_instance "$cfg"
-	procd_set_param command "$PROG" run "$dev" -F "$config_file"
+	procd_open_instance "${cfg}"
+	procd_set_param command "${PROG}" run "${dev}" -F "${config_file}"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
 }
 
-# Watch each enabled section's logical interface; restart that instance
-# on any state change (up/down/update). dnsmasq does the same via
-# procd_add_interface_trigger.
+# Watch each enabled section's logical interface and act on transitions
+# only: start the instance on `interface.up`, stop it on `interface.down`.
+# We deliberately don't subscribe to `interface.update` — mimic binds to a
+# netdev (resolved via network_get_device), not L3 state, so mid-life
+# IP/DNS/route updates would just cause needless stop+start churn.
+#
+# `start <cfg>` is idempotent under procd's "add" semantics: same params
+# is a no-op, changed params (e.g. PPPoE reassigned the netdev) trigger
+# an automatic restart with the new params.
 add_iface_trigger() {
-	local cfg="$1"
+	local cfg="${1}"
 	local enabled interface
 
-	config_get_bool enabled "$cfg" enabled 0
-	[ "$enabled" -eq 1 ] || return 0
+	config_get_bool enabled "${cfg}" enabled 0
+	[ "${enabled}" -eq 1 ] || return 0
 
-	config_get interface "$cfg" interface
-	[ -n "$interface" ] || return 0
+	config_get interface "${cfg}" interface
+	[ -n "${interface}" ] || return 0
 
-	procd_add_interface_trigger "interface.*" "$interface" \
-		/etc/init.d/mimic restart "$cfg"
+	procd_add_interface_trigger "interface.*.up" "${interface}" \
+		/etc/init.d/mimic start "${cfg}"
+	procd_add_interface_trigger "interface.*.down" "${interface}" \
+		/etc/init.d/mimic stop "${cfg}"
 }
 
 service_triggers() {
@@ -74,7 +82,7 @@ service_triggers() {
 }
 
 section_match() {
-	[ "$1" = "$instance" ] && instance_found=1
+	[ "${1}" = "${instance}" ] && instance_found=1
 }
 
 # `service mimic <action> [<name>]` — when <name> is given, only that UCI
@@ -83,23 +91,23 @@ section_match() {
 # replace, removed instances stop). procd_kill (default stop) honours the
 # instance arg too.
 start_service() {
-	local instance="$1"
+	local instance="${1}"
 
 	if ! ensure_kmod_loaded; then
-		logger -t mimic "Failed to load kernel module '$KMOD_NAME'"
+		logger -t mimic "Failed to load kernel module '${KMOD_NAME}'"
 		return 1
 	fi
 
 	config_load mimic
 
-	if [ -n "$instance" ]; then
+	if [ -n "${instance}" ]; then
 		local instance_found=0
 		config_foreach section_match mimic
-		if [ "$instance_found" -ne 1 ]; then
-			logger -t mimic "Section '$instance' not found in /etc/config/mimic"
+		if [ "${instance_found}" -ne 1 ]; then
+			logger -t mimic "Section '${instance}' not found in /etc/config/mimic"
 			return 1
 		fi
-		start_instance "$instance"
+		start_instance "${instance}"
 	else
 		config_foreach start_instance mimic
 	fi
@@ -108,6 +116,6 @@ start_service() {
 # Mimic loads its config at startup and has no SIGHUP handler, so reload
 # is implemented as stop+start. The instance arg propagates to both.
 reload_service() {
-	stop "$@"
-	start "$@"
+	stop "${@}"
+	start "${@}"
 }

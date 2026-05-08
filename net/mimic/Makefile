@@ -5,7 +5,7 @@ include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME := mimic
 PKG_VERSION := 0.7.1.20251120
-PKG_RELEASE := 3
+PKG_RELEASE := 4
 
 commit := 493faf5dfd440bc44bc0d2a88baaca4d7ef0b709
 PKG_BUILD_DIR := $(BUILD_DIR)/mimic-$(commit)
