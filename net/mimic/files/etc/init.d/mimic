@@ -8,6 +8,159 @@ KMOD_NAME=mimic
 
 . /lib/functions/network.sh
 
+# WG-as-UDP egress kill switch. Filters live at TC pref 100..199 — they
+# run *after* mimic's bpf at pref 1, so once mimic rewrites UDP→TCP the
+# u32 match (proto=17) misses and masked traffic is unaffected. mimic
+# destroys the entire egress qdisc on exit (libbpf bpf_tc_hook_destroy
+# with attach_point=EGRESS is all-or-nothing on this kernel/libbpf), so
+# we re-apply on every start_instance and after stop.
+#
+# UCI per-section options:
+#   option killswitch '1'                          # master enable
+#   list   killswitch_remote '<dst>:<port>'        # drop udp egress to dst:port
+#   list   killswitch_remote '[<v6-dst>]:<port>'   # ipv6 form
+#   list   killswitch_local  '<src>:<port>'        # drop udp egress from src:port
+#   list   killswitch_local  '[<v6-src>]:<port>'   # ipv6 form
+#
+# Each list item consumes one slot in the prio range starting at 100.
+# Range 100-199 on the managed netdev is reserved for this kill switch;
+# we wipe any existing filter in that range before re-installing.
+
+_MIMIC_KS_IPV4_RE='[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}'
+_MIMIC_KS_IPV6_RE='\(\([0-9A-Fa-f]\{1,4\}:\)\{1,\}\)\(\([0-9A-Fa-f]\{1,4\}\)\{0,1\}\)\(\(:[0-9A-Fa-f]\{1,4\}\)\{1,\}\)'
+
+# ks_parse_endpoint <string>
+# On success: prints "<family> <ip> <port>" (family=4|6) to stdout, returns 0.
+# On parse/validation failure: returns 1.
+ks_parse_endpoint() {
+	local s="${1}" ip port family
+	case "${s}" in
+		\[*\]:*)
+			family=6
+			ip="${s#\[}"; ip="${ip%%\]:*}"
+			port="${s##*\]:}"
+			;;
+		*.*.*.*:*)
+			family=4
+			ip="${s%:*}"
+			port="${s##*:}"
+			;;
+		*)
+			return 1
+			;;
+	esac
+	[ -n "${ip}" ] && [ -n "${port}" ] || return 1
+	case "${port}" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "${port}" -ge 1 ] && [ "${port}" -le 65535 ] || return 1
+	if [ "${family}" = 4 ]; then
+		printf '%s' "${ip}" | grep -q "^${_MIMIC_KS_IPV4_RE}$" || return 1
+	else
+		printf '%s' "${ip}" | grep -q "^${_MIMIC_KS_IPV6_RE}$" || return 1
+	fi
+	printf '%s %s %s\n' "${family}" "${ip}" "${port}"
+}
+
+# Wipe any filter in our managed prio range without touching pref 1 (mimic's bpf).
+ks_cleanup() {
+	local dev="${1}"
+	local prios p
+	prios=$(tc filter show dev "${dev}" egress 2>/dev/null | \
+		sed -n 's/^filter protocol [^ ]\+ pref \([0-9]\+\) .*/\1/p' | \
+		sort -un)
+	for p in ${prios}; do
+		if [ "${p}" -ge 100 ] && [ "${p}" -le 199 ]; then
+			tc filter del dev "${dev}" egress prio "${p}" 2>/dev/null
+		fi
+	done
+}
+
+# config_list_foreach callback for killswitch_remote: drop udp egress to dst:port.
+ks_add_remote() {
+	local ep="${1}" dev="${2}" parsed family ip port
+	parsed=$(ks_parse_endpoint "${ep}") || {
+		logger -t mimic "killswitch: bad killswitch_remote entry '${ep}'"
+		return 0
+	}
+	set -- ${parsed}
+	family="${1}"; ip="${2}"; port="${3}"
+	if [ "${family}" = 4 ]; then
+		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+			protocol ip u32 \
+			match ip protocol 17 0xff \
+			match ip dst "${ip}/32" \
+			match ip dport "${port}" 0xffff \
+			action drop
+	else
+		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+			protocol ipv6 u32 \
+			match ip6 protocol 17 0xff \
+			match ip6 dst "${ip}/128" \
+			match ip6 dport "${port}" 0xffff \
+			action drop
+	fi
+	_MIMIC_KS_PRIO=$((_MIMIC_KS_PRIO + 1))
+}
+
+# config_list_foreach callback for killswitch_local: drop udp egress from src:port.
+ks_add_local() {
+	local ep="${1}" dev="${2}" parsed family ip port
+	parsed=$(ks_parse_endpoint "${ep}") || {
+		logger -t mimic "killswitch: bad killswitch_local entry '${ep}'"
+		return 0
+	}
+	set -- ${parsed}
+	family="${1}"; ip="${2}"; port="${3}"
+	if [ "${family}" = 4 ]; then
+		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+			protocol ip u32 \
+			match ip protocol 17 0xff \
+			match ip src "${ip}/32" \
+			match ip sport "${port}" 0xffff \
+			action drop
+	else
+		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+			protocol ipv6 u32 \
+			match ip6 protocol 17 0xff \
+			match ip6 src "${ip}/128" \
+			match ip6 sport "${port}" 0xffff \
+			action drop
+	fi
+	_MIMIC_KS_PRIO=$((_MIMIC_KS_PRIO + 1))
+}
+
+# Entry point. Always wipes the managed prio range first (so toggling
+# killswitch off actually tears down stale rules); only re-installs
+# filters if killswitch=1 for this section.
+killswitch_apply() {
+	local cfg="${1}" dev="${2}"
+	local enabled
+
+	config_get_bool enabled "${cfg}" killswitch 0
+	ks_cleanup "${dev}"
+
+	[ "${enabled}" -eq 1 ] || return 0
+
+	tc qdisc add dev "${dev}" clsact 2>/dev/null || true
+	_MIMIC_KS_PRIO=100
+	config_list_foreach "${cfg}" killswitch_remote ks_add_remote "${dev}"
+	config_list_foreach "${cfg}" killswitch_local  ks_add_local  "${dev}"
+}
+
+killswitch_reapply_section() {
+	local cfg="${1}"
+	local enabled interface dev
+	config_get_bool enabled "${cfg}" enabled 0
+	[ "${enabled}" -eq 1 ] || return 0
+	config_get interface "${cfg}" interface
+	[ -n "${interface}" ] || return 0
+	# iface down → no netdev → nothing to leak; skip.
+	network_get_device dev "${interface}" || return 0
+	[ -n "${dev}" ] || return 0
+	killswitch_apply "${cfg}" "${dev}"
+}
+
 ensure_kmod_loaded() {
 	[ -d "/sys/module/${KMOD_NAME}" ] && return 0
 	modprobe "${KMOD_NAME}"
@@ -41,6 +194,8 @@ start_instance() {
 		logger -t mimic "Config '${config_file}' missing or unreadable, skipping (cfg=${cfg})"
 		return 0
 	fi
+
+	killswitch_apply "${cfg}" "${dev}"
 
 	procd_open_instance "${cfg}"
 	procd_set_param command "${PROG}" run "${dev}" -F "${config_file}"
@@ -119,3 +274,24 @@ reload_service() {
 	stop "${@}"
 	start "${@}"
 }
+
+# rc.common's stop() dispatch (when USE_PROCD=1) runs three phases:
+#   1. stop_service       — pre-kill hook  (we don't need this)
+#   2. procd_kill         — synchronous;   waits for actual exit
+#   3. service_stopped    — post-kill hook (we use this)
+#
+# mimic's libbpf cleanup destroys the egress qdisc — wiping our pref
+# 100..199 filters along with mimic's own pref 1 — so we re-apply
+# here, after procd_kill has confirmed mimic is gone.
+service_stopped() {
+	config_load mimic
+	config_foreach killswitch_reapply_section mimic
+}
+
+reapply_killswitch() {
+	config_load mimic
+	config_foreach killswitch_reapply_section mimic
+}
+
+EXTRA_COMMANDS="reapply_killswitch"
+EXTRA_HELP="    reapply_killswitch  Reapply WG kill switch for all enabled instances"

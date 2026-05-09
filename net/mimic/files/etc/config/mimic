@@ -9,8 +9,20 @@
 # To enable: set `enabled '1'`, ensure `interface` matches a section in
 # /etc/config/network, edit the referenced `config_file` with at least
 # one `filter` line, then `service mimic restart`.
+#
+# Optional WireGuard egress kill switch: when `killswitch '1'`, the
+# endpoints listed in `killswitch_remote` / `killswitch_local` have
+# their unmasked UDP traffic dropped, so a stopped or crashed mimic
+# can't leak a bare WG handshake. Endpoints not listed are unaffected.
 
 config mimic 'wan'
 	option enabled '0'
 	option interface 'wan'
 	option config_file '/etc/mimic/wan.conf'
+
+	# Kill switch — repeat each list option once per endpoint.
+	option killswitch '0'
+	list   killswitch_remote '<dst-ipv4>:<port>'    # e.g. 203.0.113.10:51820
+	list   killswitch_remote '[<dst-ipv6>]:<port>'  # e.g. [2001:db8::1]:51820
+	list   killswitch_local  '<src-ipv4>:<port>'    # e.g. 192.0.2.5:51820
+	list   killswitch_local  '[<src-ipv6>]:<port>'  # e.g. [2001:db8::5]:51820
