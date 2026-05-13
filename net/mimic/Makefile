@@ -7,11 +7,11 @@ PKG_NAME := mimic
 PKG_VERSION := 0.7.1.20251120
 PKG_RELEASE := 4
 
-commit := 493faf5dfd440bc44bc0d2a88baaca4d7ef0b709
+commit := 2af54f0fec899e755800e1e0af415efc7d38d071
 PKG_BUILD_DIR := $(BUILD_DIR)/mimic-$(commit)
 PKG_SOURCE := $(commit).tar.gz
 PKG_SOURCE_URL := https://github.com/tracyhatemice/mimic/archive/
-PKG_HASH := 0966e7da8191b6234d2d6f8120f0f34974a9bfb1dda45db96747b13aea8ab954
+PKG_HASH := 99a30098ffc5db0896428f12f7ba03b1d36598c8c20e8f1737bfd8bf6d0ea026
 
 PKG_BUILD_DEPENDS := argp-standalone bpf-headers bpftool/host
 
