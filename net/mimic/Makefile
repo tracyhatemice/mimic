@@ -5,13 +5,13 @@ include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME := mimic
 PKG_VERSION := 0.7.1.20251120
-PKG_RELEASE := 4
+PKG_RELEASE := 5
 
-commit := 2af54f0fec899e755800e1e0af415efc7d38d071
+commit := 13bc7a0d098a5c252994abf81ade29eb62494fbb
 PKG_BUILD_DIR := $(BUILD_DIR)/mimic-$(commit)
 PKG_SOURCE := $(commit).tar.gz
 PKG_SOURCE_URL := https://github.com/tracyhatemice/mimic/archive/
-PKG_HASH := 99a30098ffc5db0896428f12f7ba03b1d36598c8c20e8f1737bfd8bf6d0ea026
+PKG_HASH := 16c1db53ebb75bbab6955dbd136af02457f0ea58e2a804be78a6508a9d3bc752
 
 PKG_BUILD_DEPENDS := argp-standalone bpf-headers bpftool/host
 
