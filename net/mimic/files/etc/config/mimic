@@ -10,19 +10,17 @@
 # /etc/config/network, edit the referenced `config_file` with at least
 # one `filter` line, then `service mimic restart`.
 #
-# Optional WireGuard egress kill switch: when `killswitch '1'`, the
-# endpoints listed in `killswitch_remote` / `killswitch_local` have
-# their unmasked UDP traffic dropped, so a stopped or crashed mimic
-# can't leak a bare WG handshake. Endpoints not listed are unaffected.
+# Optional WireGuard egress kill switch: when `killswitch '1'`, the init
+# script scans the referenced `config_file` for `filter = …` entries and
+# drops the matching unmasked UDP egress, so a stopped or crashed mimic
+# can't leak a bare WG handshake. No separate endpoint list to maintain —
+# the kill switch protects exactly the flows mimic itself is configured
+# to handle. For `local=…` filters the IP is ignored (the source address
+# may be DHCP/PPPoE/SLAAC assigned and not stable) and only the port is
+# matched, covering both IPv4 and IPv6.
 
 config mimic 'wan'
 	option enabled '0'
 	option interface 'wan'
 	option config_file '/etc/mimic/wan.conf'
-
-	# Kill switch — repeat each list option once per endpoint.
 	option killswitch '0'
-	list   killswitch_remote '<dst-ipv4>:<port>'    # e.g. 203.0.113.10:51820
-	list   killswitch_remote '[<dst-ipv6>]:<port>'  # e.g. [2001:db8::1]:51820
-	list   killswitch_local  '<src-ipv4>:<port>'    # e.g. 192.0.2.5:51820
-	list   killswitch_local  '[<src-ipv6>]:<port>'  # e.g. [2001:db8::5]:51820

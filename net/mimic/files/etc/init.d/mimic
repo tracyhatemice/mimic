@@ -15,16 +15,25 @@ KMOD_NAME=mimic
 # with attach_point=EGRESS is all-or-nothing on this kernel/libbpf), so
 # we re-apply on every start_instance and after stop.
 #
-# UCI per-section options:
-#   option killswitch '1'                          # master enable
-#   list   killswitch_remote '<dst>:<port>'        # drop udp egress to dst:port
-#   list   killswitch_remote '[<v6-dst>]:<port>'   # ipv6 form
-#   list   killswitch_local  '<src>:<port>'        # drop udp egress from src:port
-#   list   killswitch_local  '[<v6-src>]:<port>'   # ipv6 form
+# Per-section UCI option:
+#   option killswitch '1'    # master enable
 #
-# Each list item consumes one slot in the prio range starting at 100.
+# When enabled, the per-section `config_file` (the mimic config the
+# instance loads) is scanned for `filter = …` lines — i.e. the same
+# flows mimic itself protects — and a drop rule is installed per entry:
+#
+#   filter = remote=192.0.2.1:1234              → drop UDP egress to that v4 dst:port
+#   filter = remote=[2001:db8::cafe]:5678       → drop UDP egress to that v6 dst:port
+#   filter = local=192.0.2.1:1234               → drop UDP egress with sport=1234
+#                                                 (IP ignored; covers v4 and v6 since
+#                                                 the source IP can be DHCP/PPPoE/SLAAC
+#                                                 assigned and isn't stable)
+#   filter = remote=…,padding=random,max_window=true   → trailing ,key=val pairs are
+#                                                        ignored by the kill switch
+#
 # Range 100-199 on the managed netdev is reserved for this kill switch;
-# we wipe any existing filter in that range before re-installing.
+# we wipe any existing filter in that range before re-installing. Each
+# remote filter consumes 1 prio slot, each local filter 2 (v4 + v6).
 
 _MIMIC_KS_IPV4_RE='[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}'
 _MIMIC_KS_IPV6_RE='\(\([0-9A-Fa-f]\{1,4\}:\)\{1,\}\)\(\([0-9A-Fa-f]\{1,4\}\)\{0,1\}\)\(\(:[0-9A-Fa-f]\{1,4\}\)\{1,\}\)'
@@ -76,58 +85,61 @@ ks_cleanup() {
 	done
 }
 
-# config_list_foreach callback for killswitch_remote: drop udp egress to dst:port.
-ks_add_remote() {
-	local ep="${1}" dev="${2}" parsed family ip port
-	parsed=$(ks_parse_endpoint "${ep}") || {
-		logger -t mimic "killswitch: bad killswitch_remote entry '${ep}'"
-		return 0
-	}
-	set -- ${parsed}
-	family="${1}"; ip="${2}"; port="${3}"
+# Install a drop rule for a remote filter (matches dst IP + dport).
+ks_add_remote_drop() {
+	local dev="${1}" prio="${2}" family="${3}" ip="${4}" port="${5}"
 	if [ "${family}" = 4 ]; then
-		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+		tc filter add dev "${dev}" egress prio "${prio}" \
 			protocol ip u32 \
 			match ip protocol 17 0xff \
 			match ip dst "${ip}/32" \
 			match ip dport "${port}" 0xffff \
 			action drop
 	else
-		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+		tc filter add dev "${dev}" egress prio "${prio}" \
 			protocol ipv6 u32 \
 			match ip6 protocol 17 0xff \
 			match ip6 dst "${ip}/128" \
 			match ip6 dport "${port}" 0xffff \
 			action drop
 	fi
-	_MIMIC_KS_PRIO=$((_MIMIC_KS_PRIO + 1))
 }
 
-# config_list_foreach callback for killswitch_local: drop udp egress from src:port.
-ks_add_local() {
-	local ep="${1}" dev="${2}" parsed family ip port
-	parsed=$(ks_parse_endpoint "${ep}") || {
-		logger -t mimic "killswitch: bad killswitch_local entry '${ep}'"
-		return 0
-	}
-	set -- ${parsed}
-	family="${1}"; ip="${2}"; port="${3}"
+# Install a drop rule for a local filter (matches sport only; IP is
+# intentionally ignored — the local address may be DHCP/PPPoE/SLAAC
+# assigned and isn't stable across reconnects).
+ks_add_local_drop() {
+	local dev="${1}" prio="${2}" family="${3}" port="${4}"
 	if [ "${family}" = 4 ]; then
-		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+		tc filter add dev "${dev}" egress prio "${prio}" \
 			protocol ip u32 \
 			match ip protocol 17 0xff \
-			match ip src "${ip}/32" \
 			match ip sport "${port}" 0xffff \
 			action drop
 	else
-		tc filter add dev "${dev}" egress prio "${_MIMIC_KS_PRIO}" \
+		tc filter add dev "${dev}" egress prio "${prio}" \
 			protocol ipv6 u32 \
 			match ip6 protocol 17 0xff \
-			match ip6 src "${ip}/128" \
 			match ip6 sport "${port}" 0xffff \
 			action drop
 	fi
-	_MIMIC_KS_PRIO=$((_MIMIC_KS_PRIO + 1))
+}
+
+# Read mimic's config file and emit the endpoint portion of each
+# `filter = …` line (one per stdout line):
+#   filter = local=192.0.2.1:1234        → local=192.0.2.1:1234
+#   filter = remote=[2001:db8::1]:5678,padding=random  → remote=[2001:db8::1]:5678
+ks_iter_filters() {
+	local cfg_file="${1}"
+	sed -n '
+		s/^[[:space:]]*//
+		s/[[:space:]]*$//
+		/^#/d
+		/^filter[[:space:]]*=[[:space:]]*/!d
+		s/^filter[[:space:]]*=[[:space:]]*//
+		s/,.*$//
+		p
+	' "${cfg_file}"
 }
 
 # Entry point. Always wipes the managed prio range first (so toggling
@@ -135,17 +147,57 @@ ks_add_local() {
 # filters if killswitch=1 for this section.
 killswitch_apply() {
 	local cfg="${1}" dev="${2}"
-	local enabled
+	local enabled cfg_file interface filters
 
 	config_get_bool enabled "${cfg}" killswitch 0
 	ks_cleanup "${dev}"
 
 	[ "${enabled}" -eq 1 ] || return 0
 
+	config_get interface "${cfg}" interface
+	config_get cfg_file "${cfg}" config_file "/etc/mimic/${interface}.conf"
+	if [ ! -r "${cfg_file}" ]; then
+		logger -t mimic "killswitch (${cfg}): config '${cfg_file}' unreadable, no filters installed"
+		return 0
+	fi
+
+	filters=$(ks_iter_filters "${cfg_file}")
+	if [ -z "${filters}" ]; then
+		logger -t mimic "killswitch (${cfg}): no 'filter =' entries in ${cfg_file}, nothing to drop"
+		return 0
+	fi
+
 	tc qdisc add dev "${dev}" clsact 2>/dev/null || true
-	_MIMIC_KS_PRIO=100
-	config_list_foreach "${cfg}" killswitch_remote ks_add_remote "${dev}"
-	config_list_foreach "${cfg}" killswitch_local  ks_add_local  "${dev}"
+
+	# Subshell isolates the prio counter; tc commands have real (kernel) side effects.
+	printf '%s\n' "${filters}" | (
+		prio=100
+		while IFS= read -r line; do
+			case "${line}" in
+				remote=*) side=remote; endpoint="${line#remote=}" ;;
+				local=*)  side=local;  endpoint="${line#local=}"  ;;
+				*)        continue ;;
+			esac
+			parsed=$(ks_parse_endpoint "${endpoint}") || {
+				logger -t mimic "killswitch (${cfg}): bad ${side} filter '${endpoint}' in ${cfg_file}"
+				continue
+			}
+			set -- ${parsed}
+			family="${1}"; ip="${2}"; port="${3}"
+			if [ "${side}" = remote ]; then
+				ks_add_remote_drop "${dev}" "${prio}" "${family}" "${ip}" "${port}"
+				prio=$((prio + 1))
+			else
+				ks_add_local_drop "${dev}" "${prio}"       4 "${port}"
+				ks_add_local_drop "${dev}" "$((prio + 1))" 6 "${port}"
+				prio=$((prio + 2))
+			fi
+			if [ "${prio}" -gt 199 ]; then
+				logger -t mimic "killswitch (${cfg}): prio range 100..199 exhausted, remaining filters skipped"
+				break
+			fi
+		done
+	)
 }
 
 killswitch_reapply_section() {
