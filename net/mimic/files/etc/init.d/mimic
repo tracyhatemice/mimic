@@ -213,9 +213,17 @@ killswitch_reapply_section() {
 	killswitch_apply "${cfg}" "${dev}"
 }
 
+# Best-effort, never blocks startup: with CHECKSUM_HACK=kprobe the module
+# is optional.
 ensure_kmod_loaded() {
 	[ -d "/sys/module/${KMOD_NAME}" ] && return 0
-	modprobe "${KMOD_NAME}"
+	if ! modprobe "${KMOD_NAME}" 2>/dev/null; then
+		if [ -z "${_kmod_load_warned}" ]; then
+			_kmod_load_warned=1
+			logger -t mimic "Kernel module '${KMOD_NAME}' not loadable, continuing without it"
+		fi
+	fi
+	return 0
 }
 
 start_instance() {
@@ -246,6 +254,8 @@ start_instance() {
 		logger -t mimic "Config '${config_file}' missing or unreadable, skipping (cfg=${cfg})"
 		return 0
 	fi
+
+	ensure_kmod_loaded
 
 	killswitch_apply "${cfg}" "${dev}"
 
@@ -299,11 +309,6 @@ section_match() {
 # instance arg too.
 start_service() {
 	local instance="${1}"
-
-	if ! ensure_kmod_loaded; then
-		logger -t mimic "Failed to load kernel module '${KMOD_NAME}'"
-		return 1
-	fi
 
 	config_load mimic
 
