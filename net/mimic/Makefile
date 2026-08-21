@@ -5,7 +5,7 @@ include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME := mimic
 PKG_VERSION := 0.7.1
-PKG_RELEASE := 5
+PKG_RELEASE := 6
 
 commit := 5fe6a06ce46771b33f7b835310553e8c549cd1dc
 PKG_BUILD_DIR := $(BUILD_DIR)/mimic-$(commit)
@@ -23,21 +23,21 @@ include $(INCLUDE_DIR)/package.mk
 define Package/mimic
 	SECTION := net
 	CATEGORY := Network
-	TITLE := eBPF TCP -> UDP Obfuscator
+	TITLE := eBPF UDP -> TCP Obfuscator
 	URL := https://github.com/hack3ric/mimic
-	DEPENDS := +libbpf +libffi +kmod-sched-core +kmod-sched-bpf +kmod-mimic $(BPF_DEPENDS)
+	DEPENDS := +libbpf +libffi +kmod-sched-core +kmod-sched-bpf +kmod-mimic +kmod-sched-act-bpf $(BPF_DEPENDS)
 endef
 
 define Package/mimic/description
-  Mimic is a lightweight eBPF-based tool that obfuscates UDP traffic
-  (e.g. WireGuard) as TCP by transparently rewriting packet headers at
-  TC/XDP hooks. This fork adds the anti_gro setting.
+Mimic is an eBPF-based UDP-to-TCP obfuscator. It rewrites selected
+UDP packets as TCP at TC egress and restores reply packets to UDP
+at XDP ingress. This fork adds the anti_gro setting.
 endef
 
 define KernelPackage/mimic
 	SECTION := net
 	SUBMENU := Network Support
-	TITLE := eBPF TCP -> UDP Obfuscator - Kernel Module
+	TITLE := eBPF UDP -> TCP Obfuscator - Kernel Module
 	DEPENDS := +@KERNEL_BPF_EVENTS +@KERNEL_BPF_JIT +@KERNEL_DEBUG_INFO_BTF +@KERNEL_DEBUG_INFO_BTF_MODULES @!KERNEL_DEBUG_INFO_REDUCED
 	FILES := $(PKG_BUILD_DIR)/kmod/mimic.ko
 	AUTOLOAD := $(call AutoProbe,mimic)
@@ -49,21 +49,13 @@ define KernelPackage/mimic/description
   the kernel BTF/JIT options the kfuncs depend on.
 endef
 
-mimic_compat_flags :=
-ifneq ($(findstring 6.1.,$(LINUX_VERSION)),)
-  mimic_compat_flags := COMPAT_LINUX_6_1=1
-else ifneq ($(findstring 6.6.,$(LINUX_VERSION)),)
-  mimic_compat_flags := COMPAT_LINUX_6_6=1
-endif
-
 mimic_kmod_flags := \
 	KERNEL_DIR="$(LINUX_DIR)" \
 	ARCH="$(LINUX_KARCH)" \
 	CROSS_COMPILE="$(TARGET_CROSS)" \
 	M="$(PKG_BUILD_DIR)/kmod" \
 	V="$(V)" \
-	CHECKSUM_HACK=kfunc \
-	$(mimic_compat_flags)
+	CHECKSUM_HACK=kfunc
 
 mimic_cli_flags := \
 	MODE=release \
@@ -74,10 +66,9 @@ mimic_cli_flags := \
 	ARGP_STANDALONE=1 \
 	CHECKSUM_HACK=kfunc \
 	RUNTIME_DIR=/var/run/mimic \
-	$(mimic_compat_flags) \
 	USE_LIBXDP=0
 
-export BPF_CFLAGS := \
+export BPF_CFLAGS += \
 	-I$(BPF_HEADERS_DIR)/user_headers/include \
 	-I$(STAGING_DIR)/usr/include \
 	$(if $(CONFIG_mips)$(CONFIG_mipsel)$(CONFIG_mips64),-D__MIPS$(if $(CONFIG_BIG_ENDIAN),EB,EL)__)
