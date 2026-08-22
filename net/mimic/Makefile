@@ -25,7 +25,7 @@ define Package/mimic
 	CATEGORY := Network
 	TITLE := eBPF UDP -> TCP Obfuscator
 	URL := https://github.com/hack3ric/mimic
-	DEPENDS := +libbpf +libffi +kmod-sched-core +kmod-sched-bpf +kmod-mimic +kmod-sched-act-bpf $(BPF_DEPENDS)
+	DEPENDS := +libbpf +libffi +kmod-sched-core +kmod-sched-bpf +kmod-mimic $(BPF_DEPENDS)
 endef
 
 define Package/mimic/description
@@ -68,7 +68,7 @@ mimic_cli_flags := \
 	RUNTIME_DIR=/var/run/mimic \
 	USE_LIBXDP=0
 
-export BPF_CFLAGS += \
+export BPF_CFLAGS := \
 	-I$(BPF_HEADERS_DIR)/user_headers/include \
 	-I$(STAGING_DIR)/usr/include \
 	$(if $(CONFIG_mips)$(CONFIG_mipsel)$(CONFIG_mips64),-D__MIPS$(if $(CONFIG_BIG_ENDIAN),EB,EL)__)
