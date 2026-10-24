@@ -71,6 +71,9 @@
 #ifndef likely
 #define likely(expr) __builtin_expect(!!(expr), 1)
 #endif
+#ifndef barrier_var
+#define barrier_var(var) asm volatile("" : "+r"(var))
+#endif
 
 #if __clang_major__ >= 17
 #if __has_c_attribute(clang::unlikely)
@@ -396,10 +399,19 @@ static __always_inline __u32 conn_cooldown_display(struct connection* conn) {
 }
 
 static __always_inline __u32 conn_padding(struct connection* conn, __u32 seq, __u32 ack_seq) {
-  if (conn->settings.padding != PADDING_RANDOM) return (__u32)conn->settings.padding;
-  // When anti_gro is on, the wire ack_seq is jittered per packet and isn't recoverable
-  // by the receiver, so drop it from the entropy mix to keep padding symmetric.
-  return (seq + (conn->settings.anti_gro ? 0 : ack_seq)) % 11;
+  __u32 padding;
+  if (conn->settings.padding != PADDING_RANDOM)
+    padding = (__u32)conn->settings.padding;
+  else
+    // When anti_gro is on, the wire ack_seq is jittered per packet and isn't recoverable
+    // by the receiver, so drop it from the entropy mix to keep padding symmetric.
+    padding = (seq + (conn->settings.anti_gro ? 0 : ack_seq)) % 11;
+  // HACK: Linux 7.2+ verifier tracks bounds as a single arc, so a range wrapping through 0 (from
+  // sign-extended __s16, or `% 11` lowered to multiply-shift by clang 21+) can't be narrowed by
+  // `> 0` checks, failing padding helper calls as zero-sized. Clamp explicitly; the barrier keeps
+  // clang from folding the clamp away.
+  barrier_var(padding);
+  return min(padding, (__u32)MAX_PADDING_LEN);
 }
 
 static __always_inline __be32 conn_max_window(struct connection* conn) {
